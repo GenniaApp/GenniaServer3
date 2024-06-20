@@ -1,0 +1,13 @@
+[package]
+name = "gennia-server-3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7.5"
+socketioxide = "0.13.1"
+prisma-client-rust = { git = "https://github.com/Brendonovich/prisma-client-rust", tag = "0.6.11" }
+prisma-client-rust-cli = { git = "https://github.com/Brendonovich/prisma-client-rust", tag = "0.6.11" }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+threadpool = "1.8.1"

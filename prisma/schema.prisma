@@ -1,0 +1,73 @@
+// prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  // Corresponds to the cargo alias created earlier
+  provider = "cargo prisma"
+  // The location to generate the client. Is relative to the position of the schema
+  output   = "../src/prisma.rs"
+}
+
+model CustomMapData {
+  id           String               @id @default(uuid())
+  name         String
+  width        Int
+  height       Int
+  creator      String
+  description  String
+  createdAt    DateTime             @default(now())
+  mapTilesData String // JSON.stringify(CustomMapTileData[][]) for simplicity
+  views        Int                  @default(0)
+  starCount    Int                  @default(0)
+  starPlayers  PlayersStarredMaps[]
+}
+
+model Player {
+  id        String               @id @default(uuid())
+  username  String
+  createdAt DateTime             @default(now())
+  userId    String
+  rating    Decimal              @default(0.0)
+  starMaps  PlayersStarredMaps[]
+  replayIds Int[]
+  messages  Message[]
+
+  @@unique([userId])
+}
+
+model PlayersStarredMaps {
+  player    Player        @relation(fields: [playerId], references: [id])
+  playerId  String
+  customMap CustomMapData @relation(fields: [mapId], references: [id])
+  mapId     String
+
+  @@id([playerId, mapId])
+}
+
+model Replay {
+  id             String    @id @default(uuid())
+  gameRecords    MapDiff[]
+  messageRecords Message[]
+  mapWidth       Int
+  mapHeight      Int
+}
+
+model MapDiff {
+  turn     Int    @id @default(autoincrement())
+  data     String
+  replay   Replay @relation(fields: [replayId], references: [id])
+  replayId String
+}
+
+model Message {
+  id       String @id @default(uuid())
+  turn     Int
+  sender   Player @relation(fields: [senderId], references: [id])
+  senderId String
+  replay   Replay @relation(fields: [replayId], references: [id])
+  replayId String
+}
