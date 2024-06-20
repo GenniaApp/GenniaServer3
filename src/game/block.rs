@@ -1,4 +1,6 @@
-#[derive(PartialEq)]
+use serde::Serialize;
+
+#[derive(PartialEq, Serialize, Clone, Copy)]
 pub enum TileType {
     King = 0,     // base
     City = 1,     // spawner
@@ -9,6 +11,7 @@ pub enum TileType {
     Swamp = 6,
 }
 
+#[derive(Serialize, Clone, Copy)]
 pub struct Block {
     x: i32,
     y: i32,

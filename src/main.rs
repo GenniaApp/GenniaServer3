@@ -1,23 +1,27 @@
-// Stops the client from outputting a huge number of warnings during compilation.
-mod game;
 #[allow(warnings, unused)]
+mod game;
 mod prisma;
+mod routes;
 
-use axum::{
-    http::StatusCode,
-    routing::{get, post},
-    Json, Router,
-};
+use axum::{extract::Extension, Router};
+use game::RoomPool;
 use prisma::PrismaClient;
-use prisma_client_rust::NewClientError;
 use socketioxide::{extract::SocketRef, SocketIo};
-use std::env;
+use std::{collections::BTreeMap, env, sync::Arc};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
 
-    let client: Result<PrismaClient, NewClientError> = PrismaClient::_builder().build().await;
+    let prisma_client = Arc::new(PrismaClient::_builder().build().await.unwrap());
+
+    let room_pool = RoomPool {
+        pool: BTreeMap::new(),
+        max_room_count: env::var("MAX_ROOM_COUNT")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .unwrap(),
+    };
 
     let (layer, io) = SocketIo::new_layer();
 
@@ -29,14 +33,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
-    let app = axum::Router::new()
-        .route("/ping", get(|| async { StatusCode::OK }))
-        .route("/", get(|| async { "Hello, World!" }))
+    let app = Router::new()
+        .nest("/api", routes::create_route())
+        .layer(Extension(prisma_client))
+        .layer(Extension(room_pool))
         .layer(layer);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .unwrap();
+
+    println!("GenniaServer v3 running on http://0.0.0.0:{}", port);
+
     axum::serve(listener, app).await.unwrap();
 
     Ok(())
