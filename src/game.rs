@@ -6,7 +6,7 @@ use prisma_client_rust::QueryError;
 use querystring::{querify, QueryParams};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::Serialize;
-use socketioxide::extract::{SocketRef, State};
+use socketioxide::extract::{Data, SocketRef, State};
 use std::{collections::BTreeMap, env, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::info;
@@ -68,7 +68,7 @@ pub struct RoomPoolStore {
 pub type RoomPoolState = State<RoomPoolStore>;
 
 impl RoomPoolStore {
-    pub async fn get_pool(&self) -> RoomPool {
+    pub async fn get(&self) -> RoomPool {
         let binding = self.pool.read().await;
         return binding.clone();
     }
@@ -101,6 +101,14 @@ impl RoomPoolStore {
         };
         let pool = binding.insert(room_id, room);
         Ok(())
+    }
+
+    pub async fn find_or_create_room(&self, room_id: String) -> Result<(), &'static str> {
+        let binding = self.pool.read().await;
+        match binding.clone().get(&room_id) {
+            Some(_) => return Ok(()),
+            None => return self.create_room(room_id).await,
+        }
     }
 
     pub async fn modify_room_name(&self, room_id: String, name: String) {
@@ -139,7 +147,6 @@ pub async fn handle_connection(
 
     let username = get_query_param(queries.clone(), "username");
     let mut player_id = get_query_param(queries.clone(), "player_id");
-    let room_id = get_query_param(queries.clone(), "room_id");
 
     if username.starts_with("[Bot]") {
         match db
@@ -205,6 +212,7 @@ pub async fn handle_connection(
 
     socket.on("rooms", handle_rooms);
     socket.on("create_room", handle_create_room);
+    socket.on("join_room", handle_join_room);
 }
 
 async fn reject_join(socket: SocketRef, msg: &str) {
@@ -231,7 +239,7 @@ fn generate_random_string(length: usize) -> String {
 }
 
 async fn handle_rooms(socket: SocketRef, room_pool: RoomPoolState) {
-    let _ = socket.emit("rooms", room_pool.get_pool().await);
+    let _ = socket.emit("rooms", room_pool.get().await);
 }
 
 async fn handle_create_room(socket: SocketRef, room_pool: RoomPoolState) {
@@ -244,4 +252,15 @@ async fn handle_create_room(socket: SocketRef, room_pool: RoomPoolState) {
             let _ = socket.emit("create_room:error", reason);
         }
     };
+}
+
+async fn handle_join_room(
+    socket: SocketRef,
+    Data::<String>(room_id): Data<String>,
+    room_pool: RoomPoolState,
+) {
+    match room_pool.find_or_create_room(room_id).await {
+        Ok(_) => todo!(),
+        Err(_) => todo!(),
+    }
 }
