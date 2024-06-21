@@ -4,46 +4,41 @@ mod prisma;
 mod routes;
 
 use axum::{extract::Extension, Router};
-use game::RoomPool;
+use game::{handle_connection, RoomPoolStore};
 use prisma::PrismaClient;
-use socketioxide::{extract::SocketRef, SocketIo};
-use std::{collections::BTreeMap, env, sync::Arc};
+use socketioxide::SocketIo;
+use std::{env, sync::Arc};
+use tracing::info;
+use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing::subscriber::set_global_default(FmtSubscriber::default())?;
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
 
-    let prisma_client = Arc::new(PrismaClient::_builder().build().await.unwrap());
+    let db_socket = Arc::new(PrismaClient::_builder().build().await.unwrap());
+    let db_router = Arc::clone(&db_socket);
 
-    let room_pool = RoomPool {
-        pool: BTreeMap::new(),
-        max_room_count: env::var("MAX_ROOM_COUNT")
-            .unwrap_or_else(|_| "5".to_string())
-            .parse()
-            .unwrap(),
-    };
+    let room_pool = RoomPoolStore::default();
 
-    let (layer, io) = SocketIo::new_layer();
+    let (layer, io) = SocketIo::builder()
+        .with_state(db_socket)
+        .with_state(room_pool)
+        .build_layer();
 
     // Register a handler for the default namespace
-    io.ns("/", |s: SocketRef| {
-        // For each "message" event received, send a "message-back" event with the "Hello World!" event
-        s.on("message", |s: SocketRef| {
-            s.emit("message-back", "Hello World!").ok();
-        });
-    });
+    io.ns("/", handle_connection);
 
     let app = Router::new()
         .nest("/api", routes::create_route())
-        .layer(Extension(prisma_client))
-        .layer(Extension(room_pool))
+        .layer(Extension(db_router))
         .layer(layer);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .unwrap();
 
-    println!("GenniaServer v3 running on http://0.0.0.0:{}", port);
+    info!("GenniaServer v3 running on http://0.0.0.0:{}", port);
 
     axum::serve(listener, app).await.unwrap();
 

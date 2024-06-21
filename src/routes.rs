@@ -1,8 +1,5 @@
 #[allow(warnings, unused)]
-use axum::{
-    body::Body,
-    extract::Query,
-};
+use axum::{body::Body, extract::Query};
 use axum::{
     extract::{Json, Path},
     http::StatusCode,
@@ -19,25 +16,18 @@ use prisma_client_rust::{
     Direction, QueryError,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    vec,
-};
+use std::{collections::HashMap, sync::Arc, vec};
 use uuid::Uuid;
 
-use crate::{
-    game::{Room, RoomPool},
-    prisma::*,
-};
+use crate::prisma::*;
 
-type RoomPoolState = Extension<RoomPool>;
 type PrismaState = Extension<Arc<PrismaClient>>;
 type AppResult<T> = Result<T, AppError>;
 type AppJsonResult<T> = AppResult<Json<T>>;
 
 /*
 
+/api/register => POST
 /api/rooms => GET
 /api/create_room => POST
 /api/replays/:replay_id => GET
@@ -53,8 +43,7 @@ type AppJsonResult<T> = AppResult<Json<T>>;
 */
 pub fn create_route() -> Router {
     Router::new()
-        .route("/rooms", get(handle_rooms_get))
-        .route("/create_room", post(handle_create_room))
+        .route("/api/register", post(handle_player_register))
         .route("/replays/:replay_id", get(handle_replays_get))
         .route("/maps", get(handle_all_maps_get))
         .route("/maps/new", get(handle_new_maps_get))
@@ -71,39 +60,57 @@ pub fn create_route() -> Router {
         .route("/map/:map_id/toggle_star", post(handle_star_map))
 }
 
-async fn handle_rooms_get(
-    Extension(room_pool): RoomPoolState,
-) -> AppJsonResult<BTreeMap<String, Room>> {
-    Ok(Json::from(room_pool.pool.clone()))
+#[derive(Deserialize)]
+struct RegisterRequest {
+    username: String,
+    email: String,
 }
 
 #[derive(Serialize)]
-struct RoomCreateResult {
+struct RegisterResponse {
     success: bool,
-    room_id: String,
-    reason: &'static str,
+    player_id: String,
+    reason: String,
 }
 
 #[debug_handler]
-async fn handle_create_room(
-    Extension(room_pool): RoomPoolState,
+async fn handle_player_register(
+    Extension(db): PrismaState,
+    Json(RegisterRequest { username, email }): Json<RegisterRequest>,
 ) -> Response<Body> {
-    match room_pool.create_room() {
-        Ok(room_id) => {
-            return Json(RoomCreateResult {
-                success: true,
-                room_id,
-                reason: "",
-            }).into_response()
-        }
-        Err(reason) => {
-            return Json(RoomCreateResult {
+    match db
+        .player()
+        .find_many(vec![player::username::equals(username.clone())])
+        .exec()
+        .await
+    {
+        Ok(_) => {
+            return Json(RegisterResponse {
                 success: false,
-                room_id: "".to_string(),
-                reason,
-            }).into_response()
+                player_id: "".to_string(),
+                reason: "The username was token.".to_string(),
+            })
+            .into_response()
         }
-    };
+        Err(_) => match db.player().create(username, email, vec![]).exec().await {
+            Ok(data) => {
+                return Json(RegisterResponse {
+                    success: true,
+                    player_id: data.id,
+                    reason: "".to_string(),
+                })
+                .into_response()
+            }
+            Err(err) => {
+                return Json(RegisterResponse {
+                    success: false,
+                    player_id: "".to_string(),
+                    reason: err.to_string(),
+                })
+                .into_response()
+            }
+        },
+    }
 }
 
 #[debug_handler]

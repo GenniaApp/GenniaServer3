@@ -29,14 +29,14 @@ model CustomMapData {
 model Player {
   id        String               @id @default(uuid())
   username  String
+  email     String
   createdAt DateTime             @default(now())
-  userId    String
   rating    Decimal              @default(0.0)
   starMaps  PlayersStarredMaps[]
   replayIds Int[]
   messages  Message[]
 
-  @@unique([userId])
+  @@unique([id])
 }
 
 model PlayersStarredMaps {
