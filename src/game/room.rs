@@ -4,7 +4,6 @@ use super::{block::Block, player_in_room::PlayerInRoom};
 
 #[derive(Serialize, Clone)]
 pub struct GameOptions {
-    pub force_start_num: usize,
     pub max_players: usize,
     pub game_speed: f32,
     pub map_width: f32,
@@ -18,10 +17,11 @@ pub struct GameOptions {
     pub warring_state: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct Room {
     pub room_name: String,
     pub game_options: GameOptions,
+    pub force_start_num: usize,
     pub game_started: bool,
     pub map_generated: bool,
     pub players: Vec<PlayerInRoom>,

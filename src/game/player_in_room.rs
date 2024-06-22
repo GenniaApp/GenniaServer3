@@ -1,7 +1,7 @@
 use serde::Serialize;
 use socketioxide::socket::Sid;
 
-use super::block::Block;
+use super::{block::Block, constants::MAX_TEAM_NUM};
 
 #[derive(Serialize, Clone, Default, PartialEq)]
 pub struct PlayerInRoom {
@@ -29,5 +29,13 @@ impl PlayerInRoom {
             username: self.username.clone(),
             color: self.color,
         }
+    }
+
+    pub fn set_spectate(&mut self) {
+        (*self).team = MAX_TEAM_NUM + 1;
+    }
+
+    pub fn is_spectating(&self) -> bool {
+        self.team == MAX_TEAM_NUM + 1
     }
 }

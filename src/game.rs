@@ -1,9 +1,11 @@
 mod block;
+mod constants;
 mod player_in_room;
 mod room;
 
 use axum::{http::StatusCode, Json};
 use block::Block;
+use constants::MAX_TEAM_NUM;
 use player_in_room::{MinifiedPlayer, PlayerInRoom};
 use prisma_client_rust::QueryError;
 use querystring::{querify, QueryParams};
@@ -14,7 +16,12 @@ use socketioxide::{
     extract::{Data, SocketRef, State},
     socket::Sid,
 };
-use std::{collections::BTreeMap, env, sync::Arc};
+use std::{
+    borrow::Borrow,
+    collections::{BTreeMap, VecDeque},
+    env,
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -59,8 +66,8 @@ impl RoomPoolStore {
         }
         let room = Room {
             room_name: "Untitled".to_string(),
+            force_start_num: 0,
             game_options: GameOptions {
-                force_start_num: 0,
                 max_players: 8,
                 game_speed: 1.0,
                 map_width: 0.5,
@@ -108,7 +115,7 @@ impl RoomPoolStore {
 
     pub async fn add_player(
         &self,
-        socket: SocketRef,
+        socket_id: Sid,
         room_id: String,
         player: player::Data,
     ) -> Result<PlayerInRoom, &'static str> {
@@ -123,7 +130,7 @@ impl RoomPoolStore {
 
                     new_player.username = player.username;
                     new_player.player_id = player.id;
-                    new_player.socket_id = socket.id;
+                    new_player.socket_id = socket_id;
 
                     for i in (1..player_count) {
                         if None == (*room).players.iter().find(|x| x.color == i) {
@@ -144,6 +151,39 @@ impl RoomPoolStore {
                 } else {
                     return Err("Room is full.");
                 }
+            }
+            None => return Err("Room not found."),
+        }
+    }
+
+    pub async fn modify_player_team(
+        &self,
+        socket_id: Sid,
+        room_id: String,
+        team: usize,
+    ) -> Result<(), &'static str> {
+        let mut binding = self.pool.write().await;
+
+        match binding.get_mut(&room_id) {
+            Some(room) => {
+                if team > MAX_TEAM_NUM + 1 {
+                    return Err("Team number is invalid.");
+                }
+
+                for player in (*room).players.iter_mut() {
+                    if player.socket_id == socket_id {
+                        if team != player.team {
+                            player.team = team.clone();
+
+                            if player.is_spectating() && player.force_start {
+                                player.force_start = false;
+                                room.force_start_num -= 1;
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+                return Err("Player not found.");
             }
             None => return Err("Room not found."),
         }
@@ -173,7 +213,7 @@ pub async fn handle_connection(
     match get_player(db, username.clone(), player_id.clone()).await {
         Ok(player) => {
             info!("{} ({}) successfully logged in.", username, player_id);
-            let _ = socket.emit("login:success", "");
+            let _ = socket.emit("login:success", ());
 
             socket.on(
                 "rooms",
@@ -205,14 +245,20 @@ pub async fn handle_connection(
                     match room_pool.find_or_create_room(room_id.clone()).await {
                         Ok(_) => {
                             match room_pool
-                                .add_player(socket.clone(), room_id.clone(), player.clone())
+                                .add_player(socket.id, room_id.clone(), player.clone())
                                 .await
                             {
                                 Ok(player_in_room) => {
-                                    let _ = socket.emit("join_room:success", room_id);
+                                    let _ = socket.leave_all();
+                                    let _ = socket.join(room_id.clone());
+                                    let _ = socket.emit("join_room:success", room_id.clone());
                                     let _ = socket
-                                        .broadcast()
+                                        .within(room_id.clone())
                                         .emit("message:join", player_in_room.minify());
+
+                                    let pool = room_pool.get().await;
+                                    let room = pool.get(&room_id).unwrap();
+                                    let _ = socket.within(room_id).emit("room_update", room);
                                 }
                                 Err(reason) => {
                                     let _ = socket.emit("join_room:failure", reason);
@@ -225,6 +271,38 @@ pub async fn handle_connection(
                     }
                 },
             );
+
+            socket.on(
+                "query_room",
+                |socket: SocketRef,
+                 Data::<String>(room_id): Data<String>,
+                 room_pool: RoomPoolState| async move {
+                    match room_pool.get().await.get(&room_id) {
+                        Some(room) => {
+                            let _ = socket.emit("room_update", room);
+                        }
+                        None => {
+                            let _ = socket.emit("query_room:failure", "Room not found.");
+                        }
+                    }
+                },
+            );
+
+            socket.on(
+                "set_team",
+                |socket: SocketRef,
+                 Data::<(String, usize)>((room_id, team)): Data<(String, usize)>,
+                 room_pool: RoomPoolState| async move {
+                    match room_pool.modify_player_team(socket.id, room_id, team).await {
+                        Ok(_) => {
+                            let _ = socket.emit("set_team:success", ());
+                        }
+                        Err(reason) => {
+                            let _ = socket.emit("set_team:failure", reason);
+                        }
+                    }
+                },
+            )
         }
         Err(msg) => {
             let _ = socket.emit("login:failure", msg);
