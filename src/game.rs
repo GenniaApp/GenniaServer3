@@ -1,60 +1,30 @@
 mod block;
+mod player_in_room;
+mod room;
 
 use axum::{http::StatusCode, Json};
 use block::Block;
+use player_in_room::{MinifiedPlayer, PlayerInRoom};
 use prisma_client_rust::QueryError;
 use querystring::{querify, QueryParams};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use room::{GameOptions, MinifiedRoom, Room};
 use serde::Serialize;
-use socketioxide::extract::{Data, SocketRef, State};
+use socketioxide::{
+    extract::{Data, SocketRef, State},
+    socket::Sid,
+};
 use std::{collections::BTreeMap, env, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::info;
 
-use crate::prisma::{
-    map_diff::data,
-    player::{self, email, username},
-    PrismaClient,
-};
+use crate::prisma::{player, PrismaClient};
 
-#[derive(Serialize, Clone)]
-pub struct GameOptions {
-    force_start_num: i16,
-    max_players: i16,
-    game_speed: f32,
-    map_width: f32,
-    map_height: f32,
-    city: f32,
-    swamp: f32,
-    mountain: f32,
-    fog_of_war: bool,
-    death_spectating: bool,
-    reveal_king: bool,
-    warring_state: bool,
-}
-
-#[derive(Serialize, Clone)]
-pub struct PlayerInRoom {
-    player_id: String,
-    username: String,
-    socket_id: String,
-    color: i16,
-    team: i16,
-    is_room_host: bool,
-    force_start: bool,
-    is_dead: bool,
-    last_operate_turn: i32,
-    land: Block,
-}
-
-#[derive(Clone, Serialize)]
-pub struct Room {
-    room_name: String,
-    game_options: GameOptions,
-    game_started: bool,
-    map_generated: bool,
-    players: Vec<PlayerInRoom>,
-    map: Vec<Vec<Block>>,
+#[derive(Serialize)]
+pub struct Message {
+    from: MinifiedPlayer,
+    to: MinifiedPlayer,
+    msg: String,
 }
 
 pub type RoomPool = BTreeMap<String, Room>;
@@ -70,7 +40,16 @@ pub type RoomPoolState = State<RoomPoolStore>;
 impl RoomPoolStore {
     pub async fn get(&self) -> RoomPool {
         let binding = self.pool.read().await;
-        return binding.clone();
+        binding.clone()
+    }
+
+    pub async fn serialize(&self) -> Vec<MinifiedRoom> {
+        let binding = self.pool.read().await;
+
+        binding
+            .iter()
+            .map(|(id, room)| room.minify(id.to_string()))
+            .collect()
     }
 
     pub async fn create_room(&self, room_id: String) -> Result<(), &'static str> {
@@ -126,6 +105,49 @@ impl RoomPoolStore {
             (*room).game_options = options;
         }
     }
+
+    pub async fn add_player(
+        &self,
+        socket: SocketRef,
+        room_id: String,
+        player: player::Data,
+    ) -> Result<PlayerInRoom, &'static str> {
+        let mut binding = self.pool.write().await;
+
+        match binding.get_mut(&room_id) {
+            Some(room) => {
+                let max_players = (*room).game_options.max_players;
+                let player_count = (*room).players.len();
+                if max_players > player_count {
+                    let mut new_player = PlayerInRoom::default();
+
+                    new_player.username = player.username;
+                    new_player.player_id = player.id;
+                    new_player.socket_id = socket.id;
+
+                    for i in (1..player_count) {
+                        if None == (*room).players.iter().find(|x| x.color == i) {
+                            new_player.color = i;
+                            break;
+                        }
+                    }
+                    for i in (1..player_count) {
+                        if None == (*room).players.iter().find(|x| x.team == i) {
+                            new_player.team = i;
+                            break;
+                        }
+                    }
+
+                    (*room).players.push(new_player.clone());
+
+                    return Ok(new_player);
+                } else {
+                    return Err("Room is full.");
+                }
+            }
+            None => return Err("Room not found."),
+        }
+    }
 }
 
 pub async fn handle_connection(
@@ -146,8 +168,77 @@ pub async fn handle_connection(
     let queries = querify(params);
 
     let username = get_query_param(queries.clone(), "username");
-    let mut player_id = get_query_param(queries.clone(), "player_id");
+    let player_id = get_query_param(queries.clone(), "player_id");
 
+    match get_player(db, username.clone(), player_id.clone()).await {
+        Ok(player) => {
+            info!("{} ({}) successfully logged in.", username, player_id);
+            let _ = socket.emit("login:success", "");
+
+            socket.on(
+                "rooms",
+                |socket: SocketRef, room_pool: RoomPoolState| async move {
+                    let _ = socket.emit("rooms", room_pool.serialize().await);
+                },
+            );
+
+            socket.on(
+                "create_room",
+                |socket: SocketRef, room_pool: RoomPoolState| async move {
+                    let room_id = generate_random_string(4);
+                    match room_pool.create_room(room_id.clone()).await {
+                        Ok(_) => {
+                            let _ = socket.emit("create_room:success", room_id);
+                        }
+                        Err(reason) => {
+                            let _ = socket.emit("create_room:failure", reason);
+                        }
+                    };
+                },
+            );
+
+            socket.on(
+                "join_room",
+                |socket: SocketRef,
+                 Data::<String>(room_id): Data<String>,
+                 room_pool: RoomPoolState| async move {
+                    match room_pool.find_or_create_room(room_id.clone()).await {
+                        Ok(_) => {
+                            match room_pool
+                                .add_player(socket.clone(), room_id.clone(), player.clone())
+                                .await
+                            {
+                                Ok(player_in_room) => {
+                                    let _ = socket.emit("join_room:success", room_id);
+                                    let _ = socket
+                                        .broadcast()
+                                        .emit("message:join", player_in_room.minify());
+                                }
+                                Err(reason) => {
+                                    let _ = socket.emit("join_room:failure", reason);
+                                }
+                            }
+                        }
+                        Err(reason) => {
+                            let _ = socket.emit("join_room:failure", reason);
+                        }
+                    }
+                },
+            );
+        }
+        Err(msg) => {
+            let _ = socket.emit("login:failure", msg);
+            let _ = socket.disconnect();
+            return;
+        }
+    }
+}
+
+async fn get_player(
+    db: State<Arc<PrismaClient>>,
+    username: String,
+    player_id: String,
+) -> Result<player::Data, String> {
     if username.starts_with("[Bot]") {
         match db
             .player()
@@ -156,11 +247,11 @@ pub async fn handle_connection(
             .await
         {
             Ok(data) => {
-                if data.unwrap().username == username {
-                    let _ = socket.emit("socket_id", socket.id);
+                let player = data.unwrap();
+                if player.clone().username == username {
+                    return Ok(player);
                 } else {
-                    reject_join(socket, "Username didn't match the player_id.").await;
-                    return;
+                    return Err("Username didn't match the player_id.".to_string());
                 }
             }
             Err(_) => {
@@ -171,13 +262,10 @@ pub async fn handle_connection(
                     .await
                 {
                     Ok(data) => {
-                        player_id = data.id;
-                        let _ = socket.emit("player_id", player_id.clone());
-                        let _ = socket.emit("socket_id", socket.id);
+                        return Ok(data);
                     }
                     Err(err) => {
-                        reject_join(socket, err.to_string().as_str()).await;
-                        return;
+                        return Err(err.to_string());
                     }
                 };
             }
@@ -190,34 +278,18 @@ pub async fn handle_connection(
             .await
         {
             Ok(data) => {
-                if data.unwrap().username == username {
-                    let _ = socket.emit("socket_id", socket.id);
+                let player = data.unwrap();
+                if player.clone().username == username {
+                    return Ok(player);
                 } else {
-                    reject_join(socket, "Username didn't match the player_id.").await;
-                    return;
+                    return Err("Username didn't match the player_id.".to_string());
                 }
             }
             Err(_) => {
-                reject_join(socket, "Player hasn't registered yet.").await;
-                return;
+                return Err("Player hasn't registered yet.".to_string());
             }
         }
     }
-
-    info!(
-        "{} ({}) successfully logged in.",
-        username.clone(),
-        player_id.clone()
-    );
-
-    socket.on("rooms", handle_rooms);
-    socket.on("create_room", handle_create_room);
-    socket.on("join_room", handle_join_room);
-}
-
-async fn reject_join(socket: SocketRef, msg: &str) {
-    let _ = socket.emit("reject_join", msg);
-    let _ = socket.disconnect();
 }
 
 fn get_query_param(params: QueryParams, target_key: &str) -> String {
@@ -236,31 +308,4 @@ fn generate_random_string(length: usize) -> String {
         .map(char::from)
         .collect();
     rand_string
-}
-
-async fn handle_rooms(socket: SocketRef, room_pool: RoomPoolState) {
-    let _ = socket.emit("rooms", room_pool.get().await);
-}
-
-async fn handle_create_room(socket: SocketRef, room_pool: RoomPoolState) {
-    let room_id = generate_random_string(4);
-    match room_pool.create_room(room_id.clone()).await {
-        Ok(_) => {
-            let _ = socket.emit("create_room:success", room_id);
-        }
-        Err(reason) => {
-            let _ = socket.emit("create_room:error", reason);
-        }
-    };
-}
-
-async fn handle_join_room(
-    socket: SocketRef,
-    Data::<String>(room_id): Data<String>,
-    room_pool: RoomPoolState,
-) {
-    match room_pool.find_or_create_room(room_id).await {
-        Ok(_) => todo!(),
-        Err(_) => todo!(),
-    }
 }

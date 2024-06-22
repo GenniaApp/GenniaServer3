@@ -11,7 +11,7 @@ pub enum TileType {
     Swamp = 6,
 }
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, Clone, Copy, PartialEq)]
 pub struct Block {
     x: i32,
     y: i32,
