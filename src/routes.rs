@@ -43,7 +43,7 @@ type AppJsonResult<T> = AppResult<Json<T>>;
 */
 pub fn create_route() -> Router {
     Router::new()
-        .route("/api/register", post(handle_player_register))
+        .route("/register", post(handle_player_register))
         .route("/replays/:replay_id", get(handle_replays_get))
         .route("/maps", get(handle_all_maps_get))
         .route("/maps/new", get(handle_new_maps_get))
