@@ -136,36 +136,92 @@ impl RoomPoolStore {
         }
     }
 
-    pub async fn change_player_team(
+    pub async fn query_player(
         &self,
         socket_id: Sid,
         room_id: String,
-        team: usize,
     ) -> Result<MinifiedPlayer, &'static str> {
+        let binding = self.pool.read().await;
+
+        match binding.get(&room_id) {
+            Some(room) => {
+                match room.players.iter().find(|x| x.socket_id == socket_id) {
+                    Some(player) => return Ok(player.minify()),
+                    None => return Err("Player not found."),
+                };
+            }
+            None => return Err("Room not found."),
+        }
+    }
+
+    pub async fn remove_player(&self, socket_id: Sid) {
+        let mut binding = self.pool.write().await;
+
+        for (_, room) in binding.iter_mut() {
+            for i in (0..(room.players.len() - 1)) {
+                if room.players[i].socket_id == socket_id {
+                    room.players.remove(i);
+                }
+            }
+        }
+    }
+
+    pub async fn player_force_start(
+        &self,
+        socket_id: Sid,
+        room_id: String,
+    ) -> Result<(), &'static str> {
         let mut binding = self.pool.write().await;
 
         match binding.get_mut(&room_id) {
             Some(room) => {
-                if team > MAX_TEAM_NUM + 1 {
-                    return Err("Team number is invalid.");
-                }
-
                 match room.players.iter_mut().find(|x| x.socket_id == socket_id) {
                     Some(player) => {
-                        if team != player.team {
-                            player.team = team.clone();
-
-                            if player.is_spectating() && player.force_start {
-                                player.force_start = false;
-                                room.force_start_num -= 1;
-                            }
-                        }
-                        return Ok(player.minify());
+                        player.force_start = !player.force_start;
+                        return Ok(());
                     }
                     None => return Err("Player not found."),
                 };
             }
             None => return Err("Room not found."),
+        }
+    }
+
+    pub async fn change_player_team(
+        &self,
+        socket_id: Sid,
+        room_id: String,
+        team: Value,
+    ) -> Result<MinifiedPlayer, &'static str> {
+        match team.as_u64() {
+            Some(team) => {
+                if team as usize > MAX_TEAM_NUM + 1 {
+                    return Err("Invalid team.");
+                }
+
+                let mut binding = self.pool.write().await;
+
+                match binding.get_mut(&room_id) {
+                    Some(room) => {
+                        match room.players.iter_mut().find(|x| x.socket_id == socket_id) {
+                            Some(player) => {
+                                if team as usize != player.team {
+                                    player.team = team.clone() as usize;
+
+                                    if player.is_spectating() && player.force_start {
+                                        player.force_start = false;
+                                        room.force_start_num -= 1;
+                                    }
+                                }
+                                return Ok(player.minify());
+                            }
+                            None => return Err("Player not found."),
+                        };
+                    }
+                    None => return Err("Room not found."),
+                }
+            }
+            None => return Err("Invalid team."),
         }
     }
 
@@ -455,7 +511,7 @@ pub async fn handle_connection(
             socket.on(
                 "set_team",
                 |socket: SocketRef,
-                 Data::<(String, usize)>((room_id, team)): Data<(String, usize)>,
+                 Data::<(String, Value)>((room_id, team)): Data<(String, Value)>,
                  room_pool: RoomPoolState| async move {
                     match room_pool
                         .change_player_team(socket.id, room_id.clone(), team)
@@ -532,12 +588,59 @@ pub async fn handle_connection(
 
                             let pool = room_pool.get().await;
                             let room = pool.get(&room_id).unwrap();
-                            let _ = socket.within(room_id.clone()).emit("room_update", room);
+                            let _ = socket.within(room_id).emit("room_update", room);
                         }
                         Err(reason) => {
                             let _ = socket.emit("modify_game_options:failure", reason);
                         }
                     }
+                },
+            );
+
+            socket.on(
+                "send_message",
+                |socket: SocketRef,
+                 Data::<(String, String, String)>((room_id, player_id, msg)): Data<(
+                    String,
+                    String,
+                    String,
+                )>,
+                 room_pool: State<RoomPoolStore>| async move {
+                    match room_pool.query_player(socket.id, room_id.clone()).await {
+                        Ok(player) => {
+                            let _ = socket.within(room_id).emit("message", json!((player, msg)));
+                        }
+                        Err(reason) => {
+                            let _ = socket.emit("send_message:failure", reason);
+                        }
+                    }
+                },
+            );
+
+            socket.on(
+                "force_start",
+                |socket: SocketRef,
+                 Data::<String>(room_id): Data<String>,
+                 room_pool: RoomPoolState| async move {
+                    match room_pool
+                        .player_force_start(socket.id, room_id.clone())
+                        .await
+                    {
+                        Ok(_) => {
+                            let pool = room_pool.get().await;
+                            let room = pool.get(&room_id).unwrap();
+                            let _ = socket.within(room_id).emit("room_update", room);
+                        }
+                        Err(reason) => {
+                            let _ = socket.emit("force_start:failure", reason);
+                        }
+                    }
+                },
+            );
+
+            socket.on_disconnect(
+                |socket: SocketRef, room_pool: State<RoomPoolStore>| async move {
+                    room_pool.remove_player(socket.id).await;
                 },
             )
         }
