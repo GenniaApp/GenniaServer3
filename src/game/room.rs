@@ -4,8 +4,11 @@ use super::{block::Block, player_in_room::PlayerInRoom};
 
 #[derive(Serialize, Clone)]
 pub struct GameOptions {
+    pub room_name: String,
     pub max_players: usize,
     pub game_speed: f32,
+    pub map_id: String,
+    pub map_name: String,
     pub map_width: f32,
     pub map_height: f32,
     pub city: f32,
@@ -19,7 +22,6 @@ pub struct GameOptions {
 
 #[derive(Clone, Serialize)]
 pub struct Room {
-    pub room_name: String,
     pub game_options: GameOptions,
     pub force_start_num: usize,
     pub game_started: bool,
@@ -42,7 +44,7 @@ impl Room {
     pub fn minify(&self, id: String) -> MinifiedRoom {
         MinifiedRoom {
             id,
-            room_name: self.room_name.clone(),
+            room_name: self.game_options.room_name.clone(),
             game_started: self.game_started,
             game_speed: self.game_options.game_speed,
             player_count: self.players.len(),
